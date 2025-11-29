@@ -1,4 +1,8 @@
-"""MCP server for Tesla telemetry and (upcoming) control via Tessie API."""
+"""MCP server for Tesla telemetry and control via Tessie API.
+
+This module implements the Model Context Protocol (MCP) server that exposes
+Tesla vehicle telemetry and control functions via the Tessie API.
+"""
 
 import argparse
 import os
@@ -17,13 +21,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.control import CONTROL_TOOLS, Control, build_control_dispatch
 from src.telemetry import TELEMETRY_TOOLS, Telemetry, build_telemetry_dispatch
+from src.exceptions import ConfigurationError, TessieMCPError
+from src.utils import setup_logging, validate_vin
+from src.constants import MCP_SERVER_NAME, DEFAULT_SSE_HOST, DEFAULT_SSE_PORT, ENV_VEHICLE_VIN, ENV_TELEMETRY_INTERVAL
 
 
 # Load environment variables from .env file in project root
 load_dotenv(PROJECT_ROOT / ".env")
 
+# Setup logging
+logger = setup_logging(__name__)
+
 # Initialize server
-app = Server("tessie-mcp")
+app = Server(MCP_SERVER_NAME)
 
 # Global service instances (initialized on startup)
 _telemetry: Telemetry | None = None
@@ -53,14 +63,31 @@ def get_tool_dispatch() -> dict[str, Callable[[], str]]:
 
 
 def init_services(vin: str, interval: int | str = 5) -> None:
-    """Initialize telemetry and control services and build dispatch map."""
+    """Initialize telemetry and control services and build dispatch map.
+
+    Args:
+        vin: Vehicle VIN to monitor/control
+        interval: Telemetry refresh interval in minutes or 'realtime'
+
+    Raises:
+        ConfigurationError: If services cannot be initialized
+    """
     global _telemetry, _control, _tool_dispatch
-    _telemetry = Telemetry(vin=vin, interval=interval)
-    _control = Control(vin=vin)
-    _tool_dispatch = {
-        **build_telemetry_dispatch(_telemetry),
-        **build_control_dispatch(_control),
-    }
+
+    logger.info("Initializing services for VIN ending in ...%s", vin[-4:])
+    logger.info("Telemetry interval: %s", interval)
+
+    try:
+        _telemetry = Telemetry(vin=vin, interval=interval)
+        _control = Control(vin=vin)
+        _tool_dispatch = {
+            **build_telemetry_dispatch(_telemetry),
+            **build_control_dispatch(_control),
+        }
+        logger.info("Services initialized successfully with %d tools", len(_tool_dispatch))
+    except Exception as e:
+        logger.error("Failed to initialize services: %s", str(e), exc_info=True)
+        raise ConfigurationError(f"Service initialization failed: {str(e)}")
 
 
 # =============================================================================
@@ -149,36 +176,80 @@ async def run_server_sse(
 
 
 def get_config() -> tuple[str, int | str]:
-    """Load configuration from environment or config.py."""
+    """Load configuration from environment or config.py.
+
+    Returns:
+        Tuple of (vin, interval) where interval is either an integer or 'realtime'
+
+    Raises:
+        ConfigurationError: If required configuration is missing or invalid
+    """
+    logger.debug("Loading configuration")
+
     # Load VIN
-    vin = os.getenv("VEHICLE_VIN")
+    vin = os.getenv(ENV_VEHICLE_VIN)
     if not vin:
         try:
             from config import VIN
             vin = VIN
+            logger.info("Loaded VIN from config.py")
         except ImportError:
-            print("Error: VEHICLE_VIN environment variable or config.VIN required")
-            sys.exit(1)
+            error_msg = (
+                f"{ENV_VEHICLE_VIN} environment variable or config.VIN required. "
+                "Please set VEHICLE_VIN in your .env file."
+            )
+            logger.error(error_msg)
+            raise ConfigurationError(error_msg)
+
+    # Validate VIN format
+    if not validate_vin(vin):
+        logger.warning("VIN appears to have invalid format (expected 17 characters)")
 
     # Load interval
-    interval_str = os.getenv("TELEMETRY_INTERVAL", "5")
+    interval_str = os.getenv(ENV_TELEMETRY_INTERVAL, "5")
     if interval_str.lower() == "realtime":
         interval: int | str = "realtime"
+        logger.info("Using realtime telemetry (no caching)")
     else:
         try:
             interval = int(interval_str)
-        except ValueError:
-            print(f"Error: Invalid TELEMETRY_INTERVAL: {interval_str}")
-            sys.exit(1)
+            if interval <= 0:
+                raise ValueError("Interval must be positive")
+            logger.info("Using %d minute telemetry interval", interval)
+        except ValueError as e:
+            error_msg = f"Invalid {ENV_TELEMETRY_INTERVAL}: {interval_str}. Must be a positive integer or 'realtime'."
+            logger.error(error_msg)
+            raise ConfigurationError(error_msg)
 
     return vin, interval
 
 
 def main() -> None:
-    """Main entry point for the MCP server."""
+    """Main entry point for the MCP server.
+
+    Parses command line arguments, loads configuration, and starts the server
+    in the requested transport mode (STDIO or SSE).
+    """
     import asyncio
-    
-    parser = argparse.ArgumentParser(description="Tesla Tessie MCP Server")
+
+    logger.info("Starting Tessie MCP Server")
+
+    parser = argparse.ArgumentParser(
+        description="Tesla Tessie MCP Server - Exposes Tesla telemetry and control via Tessie API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with STDIO transport (local)
+  python -m src.server
+
+  # Run with SSE transport (remote HTTP)
+  python -m src.server --transport sse --port 8000
+
+Configuration:
+  Set VEHICLE_VIN and TESSIE_TOKEN in .env file.
+  See .env.example for template.
+        """
+    )
     parser.add_argument(
         "--transport", "-t",
         choices=["stdio", "sse"],
@@ -187,23 +258,45 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Host to bind to for SSE mode (default: 0.0.0.0)"
+        default=DEFAULT_SSE_HOST,
+        help=f"Host to bind to for SSE mode (default: {DEFAULT_SSE_HOST})"
     )
     parser.add_argument(
         "--port", "-p",
         type=int,
-        default=8000,
-        help="Port for SSE mode (default: 8000)"
+        default=DEFAULT_SSE_PORT,
+        help=f"Port for SSE mode (default: {DEFAULT_SSE_PORT})"
     )
-    
-    args = parser.parse_args()
-    vin, interval = get_config()
 
-    if args.transport == "sse":
-        asyncio.run(run_server_sse(vin, interval, args.host, args.port))
-    else:
-        asyncio.run(run_server_stdio(vin, interval))
+    args = parser.parse_args()
+
+    try:
+        vin, interval = get_config()
+
+        if args.transport == "sse":
+            logger.info("Starting in SSE mode on %s:%d", args.host, args.port)
+            asyncio.run(run_server_sse(vin, interval, args.host, args.port))
+        else:
+            logger.info("Starting in STDIO mode")
+            asyncio.run(run_server_stdio(vin, interval))
+
+    except ConfigurationError as e:
+        logger.critical("Configuration error: %s", str(e))
+        print(f"\n❌ Configuration Error: {str(e)}\n", file=sys.stderr)
+        sys.exit(1)
+    except TessieMCPError as e:
+        logger.critical("Fatal error: %s", str(e))
+        print(f"\n❌ Error: {str(e)}\n", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+        print("\nServer stopped.", file=sys.stderr)
+        sys.exit(0)
+    except Exception as e:
+        logger.critical("Unexpected error: %s", str(e), exc_info=True)
+        print(f"\n❌ Unexpected Error: {str(e)}\n", file=sys.stderr)
+        print("Check logs for details.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
