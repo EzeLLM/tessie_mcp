@@ -8,10 +8,10 @@ from typing import Any, Optional, Union
 
 from dotenv import load_dotenv
 
-from .tessie_client import TessieClient
+from ..tessie_client import TessieClient
 
 # Load .env from project root for standalone usage
-_PROJECT_ROOT = Path(__file__).parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
@@ -31,22 +31,22 @@ class Telemetry:
     
     def __init__(
         self,
-        plate: str,
+        vin: str,
         interval: Union[int, str] = 5,
         client: Optional[TessieClient] = None
     ):
         """Initialize the Telemetry handler.
-        
+
         Args:
-            plate: Vehicle license plate to retrieve data for.
+            vin: Vehicle VIN to retrieve data for.
             interval: Data refresh interval in minutes. Use 'realtime' to always
                      fetch fresh data. Defaults to 5 minutes.
             client: Optional TessieClient instance. Creates one if not provided.
         """
-        self.plate = plate
+        self.vin = vin
         self.interval = interval
         self.client = client or TessieClient()
-        
+
         self._cache: Optional[dict] = None
         self._cache_time: Optional[float] = None
         self._lock = threading.Lock()
@@ -68,25 +68,25 @@ class Telemetry:
     
     def _fetch_data(self) -> dict:
         """Fetch fresh vehicle data from the API.
-        
+
         Returns:
             Vehicle state dictionary.
-        
+
         Raises:
-            ValueError: If vehicle with specified plate is not found.
+            ValueError: If vehicle with specified VIN is not found.
         """
         with self._lock:
             if not self._should_refresh() and self._cache is not None:
                 return self._cache
-            
-            state = self.client.get_vehicle_state(self.plate)
-            
+
+            state = self.client.get_vehicle_state(self.vin)
+
             if state is None:
-                raise ValueError(f"Vehicle with plate '{self.plate}' not found")
-            
+                raise ValueError(f"Vehicle with VIN '{self.vin}' not found")
+
             self._cache = state
             self._cache_time = time.time()
-            
+
             return self._cache
     
     def _get_nested(self, *keys: str, default: Any = None) -> Any:
@@ -887,9 +887,163 @@ class Telemetry:
         return f"Vehicle name: {name}"
     
     # =========================================================================
+    # NEW SPECIALIZED TELEMETRY ENDPOINTS
+    # =========================================================================
+
+    def get_battery_information(self) -> str:
+        """Get battery information using the dedicated /battery endpoint.
+
+        This method uses a focused API call that returns only battery data,
+        which is more efficient than fetching the entire vehicle state.
+
+        Returns:
+            Human-readable battery information including level, drain, energy,
+            voltage, current, and temperature.
+        """
+        battery_data = self.client.get_battery(self.vin)
+
+        # Extract fields
+        timestamp = battery_data.get("timestamp", 0)
+        battery_level = battery_data.get("battery_level", 0)
+        phantom_drain = battery_data.get("phantom_drain_percent", 0)
+        lifetime_energy = battery_data.get("lifetime_energy_used", 0)
+        pack_voltage = battery_data.get("pack_voltage", 0)
+        pack_current = battery_data.get("pack_current", 0)
+        module_temp_min = battery_data.get("module_temp_min", 0)
+        module_temp_max = battery_data.get("module_temp_max", 0)
+
+        # Convert timestamp to datetime
+        data_date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Calculate age of data in minutes
+        age_minutes = (time.time() - timestamp) / 60
+
+        # Calculate median temperature
+        median_temp = (module_temp_min + module_temp_max) / 2
+
+        # Format output
+        result = (
+            f"Date of the data: {data_date}\n"
+            f"Current date: {current_date}\n"
+            f"How old is the data (in minutes): {age_minutes:.1f}\n"
+            f"Battery level: {round(battery_level)}%\n"
+            f"Phantom battery drain (battery percentage vehicle consumed while not being used): {phantom_drain}%\n"
+            f"Energy used so far (since production): {lifetime_energy} kWh\n"
+            f"Battery Pack voltage: {pack_voltage} V\n"
+            f"Battery Pack current: {pack_current} A\n"
+            f"Battery temperature: {median_temp}°C"
+        )
+
+        return result
+
+    def get_battery_health_information(self) -> str:
+        """Get battery health information using the dedicated /battery_health endpoint.
+
+        This method provides information about the long-term health and capacity
+        of the battery pack.
+
+        Returns:
+            Human-readable battery health information.
+        """
+        health_data = self.client.get_battery_health(self.vin)
+        result = health_data.get("result", {})
+
+        max_range = result.get("max_range", 0)
+        max_ideal_range = result.get("max_ideal_range", 0)
+        capacity = result.get("capacity", 0)
+
+        output = (
+            f"Battery Health Information:\n"
+            f"Maximum range: {max_range:.2f} miles\n"
+            f"Maximum ideal range: {max_ideal_range:.2f} miles\n"
+            f"Battery capacity: {capacity:.2f} kWh"
+        )
+
+        return output
+
+    def get_location_information(self) -> str:
+        """Get location information using the dedicated /location endpoint.
+
+        Returns current location with address and saved location name if available.
+
+        Returns:
+            Human-readable location information.
+        """
+        location_data = self.client.get_location(self.vin)
+
+        latitude = location_data.get("latitude", 0)
+        longitude = location_data.get("longitude", 0)
+        address = location_data.get("address", "Unknown address")
+        saved_location = location_data.get("saved_location")
+
+        output = (
+            f"Vehicle Location:\n"
+            f"Coordinates: {latitude:.6f}, {longitude:.6f}\n"
+            f"Address: {address}"
+        )
+
+        if saved_location:
+            output += f"\nSaved location: {saved_location}"
+
+        return output
+
+    def get_tire_pressure_information(self) -> str:
+        """Get tire pressure information using the dedicated /tire_pressure endpoint.
+
+        Returns tire pressure for all four tires measured in bar with status indicators.
+
+        Returns:
+            Human-readable tire pressure information.
+        """
+        tire_data = self.client.get_tire_pressure(self.vin)
+
+        front_left = tire_data.get("front_left", 0)
+        front_right = tire_data.get("front_right", 0)
+        rear_left = tire_data.get("rear_left", 0)
+        rear_right = tire_data.get("rear_right", 0)
+
+        fl_status = tire_data.get("front_left_status", "unknown")
+        fr_status = tire_data.get("front_right_status", "unknown")
+        rl_status = tire_data.get("rear_left_status", "unknown")
+        rr_status = tire_data.get("rear_right_status", "unknown")
+
+        timestamp = tire_data.get("timestamp", 0)
+        data_date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+        output = (
+            f"Tire Pressure (as of {data_date}):\n"
+            f"Front Left: {front_left:.3f} bar ({fl_status})\n"
+            f"Front Right: {front_right:.3f} bar ({fr_status})\n"
+            f"Rear Left: {rear_left:.3f} bar ({rl_status})\n"
+            f"Rear Right: {rear_right:.3f} bar ({rr_status})"
+        )
+
+        return output
+
+    def get_vehicle_status(self) -> str:
+        """Get vehicle status using the dedicated /status endpoint.
+
+        Returns whether the vehicle is asleep, waiting_for_sleep, or awake.
+
+        Returns:
+            Human-readable vehicle status.
+        """
+        status_data = self.client.get_status(self.vin)
+        status = status_data.get("status", "unknown")
+
+        status_messages = {
+            "asleep": "Vehicle is asleep (low power mode, systems offline)",
+            "waiting_for_sleep": "Vehicle is waiting to sleep (systems will shut down soon)",
+            "awake": "Vehicle is awake (systems active and responsive)",
+        }
+
+        return status_messages.get(status, f"Vehicle status: {status}")
+
+    # =========================================================================
     # SUMMARY METHODS
     # =========================================================================
-    
+
     def get_all_heater_status(self) -> str:
         """Get formatted status of all heaters.
         
@@ -959,4 +1113,3 @@ class Telemetry:
             parts.append(state.lower())
         
         return ", ".join(parts)
-
