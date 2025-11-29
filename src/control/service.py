@@ -65,29 +65,57 @@ class Control:
             "Control endpoints will ship soon."
         )
 
+    def _run_command(self, action: str, api_call, success_message: str) -> str:
+        """Execute a control command with consistent logging and errors."""
+        sanitized_vin = sanitize_vin_for_logging(self.vin)
+        self.logger.info("Executing %s for VIN %s", action, sanitized_vin)
+
+        try:
+            response = api_call()
+            result = response.get("result", False)
+
+            if result:
+                self.logger.info("%s succeeded for VIN %s", action, sanitized_vin)
+                return success_message
+            else:
+                error = response.get("reason", "Unknown error")
+                self.logger.warning("%s failed for VIN %s: %s", action, sanitized_vin, error)
+                raise VehicleCommandError(action, error, self.vin)
+
+        except VehicleCommandError:
+            raise
+        except TessieAPIError as e:
+            self.logger.error("API error during %s for VIN %s: %s", action, sanitized_vin, str(e))
+            return f"Failed to {action.replace('_', ' ')}: {str(e)}"
+        except Exception as e:
+            self.logger.error(
+                "Unexpected error during %s for VIN %s: %s",
+                action,
+                sanitized_vin,
+                str(e),
+                exc_info=True
+            )
+            return f"Error attempting to {action.replace('_', ' ')}: {str(e)}"
+
     def lock_doors(self) -> str:
-        """Lock the vehicle doors.
-
-        Returns:
-            Status message (currently a placeholder)
-
-        Note:
-            This command is not yet implemented. It will be wired to the
-            Tessie API in a future update.
-        """
-        return self._coming_soon("lock_doors")
+        """Lock the vehicle doors."""
+        return self._run_command(
+            "lock_doors",
+            lambda: self.client.lock_doors(self.vin),
+            "Vehicle locked."
+        )
 
     def unlock_doors(self) -> str:
         """Unlock the vehicle doors.
 
         Returns:
-            Status message (currently a placeholder)
-
-        Note:
-            This command is not yet implemented. It will be wired to the
-            Tessie API in a future update.
+            Status message from the API
         """
-        return self._coming_soon("unlock_doors")
+        return self._run_command(
+            "unlock_doors",
+            lambda: self.client.unlock_doors(self.vin),
+            "Vehicle unlocked."
+        )
 
     def honk_horn(self) -> str:
         """Honk the vehicle horn.
@@ -103,43 +131,11 @@ class Control:
             >>> print(control.honk_horn())
             Successfully honked the horn!
         """
-        sanitized_vin = sanitize_vin_for_logging(self.vin)
-        self.logger.info("Executing honk_horn for VIN %s", sanitized_vin)
-
-        try:
-            response = self.client.honk_horn(self.vin)
-            result = response.get("result", False)
-
-            if result:
-                self.logger.info("Horn honked successfully for VIN %s", sanitized_vin)
-                return "Successfully honked the horn!"
-            else:
-                error = response.get("reason", "Unknown error")
-                self.logger.warning(
-                    "Honk failed for VIN %s: %s",
-                    sanitized_vin,
-                    error
-                )
-                raise VehicleCommandError("honk_horn", error, self.vin)
-
-        except VehicleCommandError:
-            # Re-raise our custom exception
-            raise
-        except TessieAPIError as e:
-            self.logger.error(
-                "API error honking horn for VIN %s: %s",
-                sanitized_vin,
-                str(e)
-            )
-            return f"Failed to honk horn: {str(e)}"
-        except Exception as e:
-            self.logger.error(
-                "Unexpected error honking horn for VIN %s: %s",
-                sanitized_vin,
-                str(e),
-                exc_info=True
-            )
-            return f"Error honking horn: {str(e)}"
+        return self._run_command(
+            "honk_horn",
+            lambda: self.client.honk_horn(self.vin),
+            "Successfully honked the horn!"
+        )
 
     def flash_lights(self) -> str:
         """Flash the vehicle lights.
@@ -156,64 +152,56 @@ class Control:
             >>> print(control.flash_lights())
             Successfully flashed the lights!
         """
-        sanitized_vin = sanitize_vin_for_logging(self.vin)
-        self.logger.info("Executing flash_lights for VIN %s", sanitized_vin)
-
-        try:
-            response = self.client.flash_lights(self.vin)
-            result = response.get("result", False)
-
-            if result:
-                self.logger.info("Lights flashed successfully for VIN %s", sanitized_vin)
-                return "Successfully flashed the lights!"
-            else:
-                error = response.get("reason", "Unknown error")
-                self.logger.warning(
-                    "Flash failed for VIN %s: %s",
-                    sanitized_vin,
-                    error
-                )
-                raise VehicleCommandError("flash_lights", error, self.vin)
-
-        except VehicleCommandError:
-            # Re-raise our custom exception
-            raise
-        except TessieAPIError as e:
-            self.logger.error(
-                "API error flashing lights for VIN %s: %s",
-                sanitized_vin,
-                str(e)
-            )
-            return f"Failed to flash lights: {str(e)}"
-        except Exception as e:
-            self.logger.error(
-                "Unexpected error flashing lights for VIN %s: %s",
-                sanitized_vin,
-                str(e),
-                exc_info=True
-            )
-            return f"Error flashing lights: {str(e)}"
+        return self._run_command(
+            "flash_lights",
+            lambda: self.client.flash_lights(self.vin),
+            "Successfully flashed the lights!"
+        )
 
     def start_climate(self) -> str:
         """Start climate control preconditioning.
 
         Returns:
-            Status message (currently a placeholder)
-
-        Note:
-            This command is not yet implemented. It will be wired to the
-            Tessie API in a future update.
+            Status message from the API
         """
-        return self._coming_soon("start_climate")
+        return self._run_command(
+            "start_climate",
+            lambda: self.client.start_climate(self.vin),
+            "Climate/preconditioning started."
+        )
 
     def stop_climate(self) -> str:
         """Stop climate control preconditioning.
 
         Returns:
-            Status message (currently a placeholder)
-
-        Note:
-            This command is not yet implemented. It will be wired to the
-            Tessie API in a future update.
+            Status message from the API
         """
-        return self._coming_soon("stop_climate")
+        return self._run_command(
+            "stop_climate",
+            lambda: self.client.stop_climate(self.vin),
+            "Climate/preconditioning stopped."
+        )
+
+    def set_temperature(
+        self,
+        temperature: float | int | None,
+        wait_for_completion: Optional[bool] = True
+    ) -> str:
+        """Set cabin temperature in Celsius."""
+        if temperature is None:
+            return "Temperature is required."
+
+        try:
+            temp_value = float(temperature)
+        except (TypeError, ValueError):
+            return "Temperature must be a number in Celsius."
+
+        return self._run_command(
+            "set_temperature",
+            lambda: self.client.set_temperatures(
+                self.vin,
+                temperature=temp_value,
+                wait_for_completion=wait_for_completion,
+            ),
+            f"Set cabin temperature to {temp_value:.1f} C."
+        )

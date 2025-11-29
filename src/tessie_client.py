@@ -26,6 +26,11 @@ from .constants import (
     ENDPOINT_STATUS,
     ENDPOINT_COMMAND_HONK,
     ENDPOINT_COMMAND_FLASH,
+    ENDPOINT_COMMAND_LOCK,
+    ENDPOINT_COMMAND_UNLOCK,
+    ENDPOINT_COMMAND_START_CLIMATE,
+    ENDPOINT_COMMAND_STOP_CLIMATE,
+    ENDPOINT_COMMAND_SET_TEMPERATURES,
 )
 from .exceptions import (
     VehicleNotFoundError,
@@ -448,3 +453,94 @@ class TessieClient:
         url = f"{self.base_url}{ENDPOINT_COMMAND_FLASH.format(vin=vin)}"
         return self._make_request("POST", url)
 
+    def lock_doors(self, vin: str) -> Dict[str, Any]:
+        """Lock the vehicle doors.
+
+        Args:
+            vin: Vehicle VIN.
+
+        Returns:
+            Command response from Tessie API.
+        """
+        sanitized_vin = sanitize_vin_for_logging(vin)
+        self.logger.info("Sending lock command to VIN %s", sanitized_vin)
+
+        url = f"{self.base_url}{ENDPOINT_COMMAND_LOCK.format(vin=vin)}"
+        return self._make_request("POST", url)
+
+    def unlock_doors(self, vin: str) -> Dict[str, Any]:
+        """Unlock the vehicle doors.
+
+        Args:
+            vin: Vehicle VIN.
+
+        Returns:
+            Command response from Tessie API.
+        """
+        sanitized_vin = sanitize_vin_for_logging(vin)
+        self.logger.info("Sending unlock command to VIN %s", sanitized_vin)
+
+        url = f"{self.base_url}{ENDPOINT_COMMAND_UNLOCK.format(vin=vin)}"
+        return self._make_request("POST", url)
+
+    def start_climate(self, vin: str) -> Dict[str, Any]:
+        """Start climate/preconditioning.
+
+        Args:
+            vin: Vehicle VIN.
+
+        Returns:
+            Command response from Tessie API.
+        """
+        sanitized_vin = sanitize_vin_for_logging(vin)
+        self.logger.info("Sending start_climate command to VIN %s", sanitized_vin)
+
+        url = f"{self.base_url}{ENDPOINT_COMMAND_START_CLIMATE.format(vin=vin)}"
+        return self._make_request("POST", url)
+
+    def stop_climate(self, vin: str) -> Dict[str, Any]:
+        """Stop climate/preconditioning.
+
+        Args:
+            vin: Vehicle VIN.
+
+        Returns:
+            Command response from Tessie API.
+        """
+        sanitized_vin = sanitize_vin_for_logging(vin)
+        self.logger.info("Sending stop_climate command to VIN %s", sanitized_vin)
+
+        url = f"{self.base_url}{ENDPOINT_COMMAND_STOP_CLIMATE.format(vin=vin)}"
+        return self._make_request("POST", url)
+
+    def set_temperatures(
+        self,
+        vin: str,
+        temperature: float,
+        wait_for_completion: bool | None = None
+    ) -> Dict[str, Any]:
+        """Set cabin temperature (Celsius).
+
+        Args:
+            vin: Vehicle VIN.
+            temperature: Target cabin temperature in Celsius.
+            wait_for_completion: Whether to wait for completion before returning.
+
+        Returns:
+            Command response from Tessie API.
+        """
+        sanitized_vin = sanitize_vin_for_logging(vin)
+        self.logger.info(
+            "Sending set_temperatures command to VIN %s (temperature=%s, wait_for_completion=%s)",
+            sanitized_vin,
+            temperature,
+            wait_for_completion,
+        )
+
+        url = f"{self.base_url}{ENDPOINT_COMMAND_SET_TEMPERATURES.format(vin=vin)}"
+        params: Dict[str, Any] = {"temperature": temperature}
+
+        if wait_for_completion is not None:
+            params["wait_for_completion"] = str(wait_for_completion).lower() if isinstance(wait_for_completion, bool) else wait_for_completion
+
+        return self._make_request("POST", url, params=params)

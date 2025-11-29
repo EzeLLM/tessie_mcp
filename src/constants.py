@@ -88,6 +88,11 @@ ENDPOINT_TIRE_PRESSURE = "/{vin}/tire_pressure"
 ENDPOINT_STATUS = "/{vin}/status"
 ENDPOINT_COMMAND_HONK = "/{vin}/command/honk"
 ENDPOINT_COMMAND_FLASH = "/{vin}/command/flash"
+ENDPOINT_COMMAND_LOCK = "/{vin}/command/lock"
+ENDPOINT_COMMAND_UNLOCK = "/{vin}/command/unlock"
+ENDPOINT_COMMAND_START_CLIMATE = "/{vin}/command/start_climate"
+ENDPOINT_COMMAND_STOP_CLIMATE = "/{vin}/command/stop_climate"
+ENDPOINT_COMMAND_SET_TEMPERATURES = "/{vin}/command/set_temperatures"
 
 # Data Validation Thresholds
 MIN_BATTERY_LEVEL = 0

@@ -58,14 +58,14 @@ TELEMETRY_TOOLS: list[Tool] = [
 ]
 
 
-def build_telemetry_dispatch(telemetry: Telemetry) -> dict[str, Callable[[], str]]:
+def build_telemetry_dispatch(telemetry: Telemetry) -> dict[str, Callable[[dict], str]]:
     """Build a mapping of telemetry tool names to bound methods."""
-    dispatch: dict[str, Callable[[], str]] = {}
+    dispatch: dict[str, Callable[[dict], str]] = {}
     for name, _ in TELEMETRY_TOOL_SPECS:
         method = getattr(telemetry, name, None)
         if method is None:
             raise AttributeError(f"Telemetry missing expected method {name}")
-        dispatch[name] = method
+        dispatch[name] = lambda _args=None, method=method: method()
     return dispatch
 
 

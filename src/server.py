@@ -38,7 +38,7 @@ app = Server(MCP_SERVER_NAME)
 # Global service instances (initialized on startup)
 _telemetry: Telemetry | None = None
 _control: Control | None = None
-_tool_dispatch: dict[str, Callable[[], str]] = {}
+_tool_dispatch: dict[str, Callable[[dict], str]] = {}
 
 
 def get_telemetry() -> Telemetry:
@@ -55,7 +55,7 @@ def get_control() -> Control:
     return _control
 
 
-def get_tool_dispatch() -> dict[str, Callable[[], str]]:
+def get_tool_dispatch() -> dict[str, Callable[[dict], str]]:
     """Get the combined tool dispatch mapping."""
     if not _tool_dispatch:
         raise RuntimeError("Tool dispatch not initialized. Call init_services() first.")
@@ -105,13 +105,12 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a telemetry or control tool."""
     dispatch = get_tool_dispatch()
-    # arguments are unused today but reserved for future control params
-    _ = arguments
-    
+    arguments = arguments or {}
+
     if name not in dispatch:
         raise ValueError(f"Unknown tool: {name}")
     
-    result = dispatch[name]()
+    result = dispatch[name](arguments)
     return [TextContent(type="text", text=result)]
 
 
@@ -145,11 +144,8 @@ async def run_server_sse(
     sse = SseServerTransport("/messages")
 
     # IMPORTANT: These handlers must NOT return anything because the MCP SSE
-    # transport handles responses internally via request._send. Returning a
-    # Response would interfere with that.
-
-    # However, Starlette Route expects a response, so we use a workaround:
-    # We'll use raw ASGI apps via Mount instead of Route
+    # transport handles responses via the provided send callable. Returning a
+    # Response would interfere with that, so we wrap them as ASGI endpoints.
 
     async def handle_sse_asgi(scope, receive, send):
         """Handle SSE connections as ASGI app."""
@@ -197,31 +193,20 @@ async def run_server_sse(
         """Health check endpoint."""
         return JSONResponse({"status": "ok", "server": MCP_SERVER_NAME})
 
-    # Create custom ASGI route handler that wraps our ASGI apps
-    def asgi_route(path: str, asgi_app, methods=None):
-        """Create a Starlette route for an ASGI app."""
-        async def handler(request):
-            # The ASGI app handles the response via send(), so we don't return anything
-            # But we need to somehow get Starlette to not try to call our return value
-            # The solution: use a StreamingResponse that the ASGI app controls
-            from starlette.responses import StreamingResponse
+    class ASGIEndpoint:
+        """Wrap a bare ASGI callable so Starlette treats it as an ASGI app."""
 
-            # Actually, let's just call the ASGI app and return a dummy response
-            # since the ASGI app already sent the real response
-            await asgi_app(request.scope, request.receive, request._send)
+        def __init__(self, handler: Callable):
+            self.handler = handler
 
-            # This response won't actually be sent because the ASGI app already sent one
-            # But it satisfies Starlette's requirement that we return something
-            from starlette.responses import Response
-            return Response()
-
-        return Route(path, handler, methods=methods)
+        async def __call__(self, scope, receive, send):
+            await self.handler(scope, receive, send)
 
     starlette_app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
-            asgi_route("/sse", handle_sse_asgi, methods=["GET"]),
-            asgi_route("/messages", handle_messages_asgi, methods=["POST"]),
+            Route("/sse", ASGIEndpoint(handle_sse_asgi), methods=["GET"]),
+            Route("/messages", ASGIEndpoint(handle_messages_asgi), methods=["POST"]),
         ],
     )
     

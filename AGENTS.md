@@ -4,7 +4,7 @@ This repo hosts an MCP server that exposes Tesla telemetry and control via the T
 
 ## Status (2025-11-29)
 - Telemetry: implemented with both legacy (full state) and new efficient specialized endpoints.
-- Control: honk and flash lights are fully implemented; lock/unlock and climate control are scaffolded.
+- Control: honk/flash, lock/unlock, climate start/stop, and temperature set are implemented.
 - Vehicles are now identified by VIN instead of license plate.
 - Expect breaking changes until the first stable tag.
 
@@ -17,7 +17,7 @@ This repo hosts an MCP server that exposes Tesla telemetry and control via the T
 - `src/server.py` — MCP server; merges telemetry + control tool registries and dispatch.
 - `src/telemetry/service.py` — Telemetry retrieval/caching with specialized endpoint methods.
 - `src/telemetry/tools.py` — Telemetry tool specs and dispatch map.
-- `src/control/service.py` — Control service with real API calls for honk/flash, placeholders for others.
+- `src/control/service.py` — Control service with real API calls for honk/flash, lock/unlock, climate control, and temperature setting.
 - `src/control/tools.py` — Control tool specs and dispatch map.
 - `src/tessie_client.py` — Tessie REST client supporting VIN-based endpoints (auth via `TESSIE_TOKEN`).
 
@@ -44,18 +44,18 @@ Battery/charging: `get_battery_level`, `get_charging_state`, `get_minutes_to_ful
 **Implemented:**
 - `honk_horn` — Honk the vehicle horn (real API call)
 - `flash_lights` — Flash the vehicle lights (real API call)
-
-**Coming Soon (stubbed):**
-- `lock_doors`, `unlock_doors`, `start_climate`, `stop_climate` — Currently return placeholder text.
+- `lock_doors` / `unlock_doors` — Lock/unlock the vehicle (real API calls)
+- `start_climate` / `stop_climate` — Start/stop climate or preconditioning (real API calls)
+- `set_temperature` — Set cabin temperature in Celsius (supports wait_for_completion flag)
 
 ## Usage Notes for Agents
 - **Prefer new specialized telemetry endpoints** (`get_battery_information`, etc.) over legacy tools for better performance.
 - Control tools: `honk_horn` and `flash_lights` are fully operational and will trigger real vehicle actions.
-- Arguments: current tools take no parameters; still pass an empty object as required by MCP.
+- Arguments: most tools take no parameters; `set_temperature` expects `temperature` (Celsius) and optional `wait_for_completion`.
 - SSE mode: endpoints `/sse` and `/messages`; health at `/health`.
 - Vehicle identification: Use VIN (e.g., `5YJ3E1EA1KF123456`) instead of license plate.
 
 ## Safety & Expectations
 - **Warning:** `honk_horn` and `flash_lights` will trigger real vehicle actions. Use responsibly.
-- Other control actions (`lock_doors`, `unlock_doors`, `start_climate`, `stop_climate`) are still stubbed.
+- Other control actions also call the live Tessie API; use only when intended.
 - Be prepared for minor API/shape changes until the first stable tag.
