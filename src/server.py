@@ -143,33 +143,103 @@ async def run_server_sse(
     init_services(vin=vin, interval=interval)
     
     sse = SseServerTransport("/messages")
-    
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await app.run(
-                streams[0], streams[1], app.create_initialization_options()
-            )
-    
-    async def handle_messages(request):
-        await sse.handle_post_message(request.scope, request.receive, request._send)
-    
+
+    # IMPORTANT: These handlers must NOT return anything because the MCP SSE
+    # transport handles responses internally via request._send. Returning a
+    # Response would interfere with that.
+
+    # However, Starlette Route expects a response, so we use a workaround:
+    # We'll use raw ASGI apps via Mount instead of Route
+
+    async def handle_sse_asgi(scope, receive, send):
+        """Handle SSE connections as ASGI app."""
+        logger.info("SSE connection from %s", scope.get("client", ["unknown"])[0] if scope.get("client") else "unknown")
+        try:
+            async with sse.connect_sse(scope, receive, send) as streams:
+                logger.info("SSE streams connected, running MCP app")
+                await app.run(
+                    streams[0], streams[1], app.create_initialization_options()
+                )
+                logger.info("SSE connection closed")
+        except Exception as e:
+            logger.error("Error in SSE handler: %s", str(e), exc_info=True)
+            # Send error response
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": f"Error: {str(e)}".encode(),
+            })
+
+    async def handle_messages_asgi(scope, receive, send):
+        """Handle POST messages as ASGI app."""
+        logger.info("Message POST from %s", scope.get("client", ["unknown"])[0] if scope.get("client") else "unknown")
+        try:
+            await sse.handle_post_message(scope, receive, send)
+            logger.debug("Message handled successfully")
+        except Exception as e:
+            logger.error("Error in messages handler: %s", str(e), exc_info=True)
+            # Send error response
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": f"Error: {str(e)}".encode(),
+            })
+
     async def health(request):
-        return JSONResponse({"status": "ok", "server": "tessie-mcp"})
-    
+        """Health check endpoint."""
+        return JSONResponse({"status": "ok", "server": MCP_SERVER_NAME})
+
+    # Create custom ASGI route handler that wraps our ASGI apps
+    def asgi_route(path: str, asgi_app, methods=None):
+        """Create a Starlette route for an ASGI app."""
+        async def handler(request):
+            # The ASGI app handles the response via send(), so we don't return anything
+            # But we need to somehow get Starlette to not try to call our return value
+            # The solution: use a StreamingResponse that the ASGI app controls
+            from starlette.responses import StreamingResponse
+
+            # Actually, let's just call the ASGI app and return a dummy response
+            # since the ASGI app already sent the real response
+            await asgi_app(request.scope, request.receive, request._send)
+
+            # This response won't actually be sent because the ASGI app already sent one
+            # But it satisfies Starlette's requirement that we return something
+            from starlette.responses import Response
+            return Response()
+
+        return Route(path, handler, methods=methods)
+
     starlette_app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
-            Route("/sse", handle_sse, methods=["GET"]),
-            Route("/messages", handle_messages, methods=["POST"]),
+            asgi_route("/sse", handle_sse_asgi, methods=["GET"]),
+            asgi_route("/messages", handle_messages_asgi, methods=["POST"]),
         ],
     )
     
-    print(f"🚗 Tessie MCP Server running at http://{host}:{port}")
+    logger.info("="*60)
+    logger.info("🚗 Tessie MCP Server running")
+    logger.info("   Base URL: http://%s:%d", host, port)
+    logger.info("   SSE endpoint: http://%s:%d/sse", host, port)
+    logger.info("   Messages endpoint: http://%s:%d/messages", host, port)
+    logger.info("   Health check: http://%s:%d/health", host, port)
+    logger.info("   Tools available: %d", len(_tool_dispatch))
+    logger.info("="*60)
+
+    print(f"\n🚗 Tessie MCP Server running at http://{host}:{port}")
     print(f"   SSE endpoint: http://{host}:{port}/sse")
+    print(f"   Messages endpoint: http://{host}:{port}/messages")
     print(f"   Health check: http://{host}:{port}/health")
-    
+    print(f"   Press CTRL+C to quit\n")
+
     config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()

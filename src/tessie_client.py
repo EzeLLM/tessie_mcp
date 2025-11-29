@@ -447,3 +447,4 @@ class TessieClient:
 
         url = f"{self.base_url}{ENDPOINT_COMMAND_FLASH.format(vin=vin)}"
         return self._make_request("POST", url)
+
