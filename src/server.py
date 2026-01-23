@@ -1,9 +1,14 @@
-"""MCP server for Tesla vehicle telemetry via Tessie API."""
+"""MCP server for Tesla telemetry and control via Tessie API.
+
+This module implements the Model Context Protocol (MCP) server that exposes
+Tesla vehicle telemetry and control functions via the Tessie API.
+"""
 
 import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 from mcp.server import Server
@@ -14,284 +19,105 @@ from mcp.types import Tool, TextContent
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.telemetry import Telemetry
+from src.control import CONTROL_TOOLS, Control, build_control_dispatch
+from src.telemetry import TELEMETRY_TOOLS, Telemetry, build_telemetry_dispatch
+from src.exceptions import ConfigurationError, TessieMCPError
+from src.utils import setup_logging, validate_vin
+from src.constants import MCP_SERVER_NAME, DEFAULT_SSE_HOST, DEFAULT_SSE_PORT, ENV_VEHICLE_VIN, ENV_TELEMETRY_INTERVAL
 
 
 # Load environment variables from .env file in project root
 load_dotenv(PROJECT_ROOT / ".env")
 
-# Initialize server
-app = Server("tessie-telemetry")
+# Setup logging
+logger = setup_logging(__name__)
 
-# Global telemetry instance (initialized on startup)
+# Initialize server
+app = Server(MCP_SERVER_NAME)
+
+# Global service instances (initialized on startup)
 _telemetry: Telemetry | None = None
+_control: Control | None = None
+_tool_dispatch: dict[str, Callable[[dict], str]] = {}
 
 
 def get_telemetry() -> Telemetry:
-    """Get the global Telemetry instance.
-    
-    Returns:
-        Telemetry instance.
-    
-    Raises:
-        RuntimeError: If telemetry is not initialized.
-    """
+    """Get the global Telemetry instance."""
     if _telemetry is None:
-        raise RuntimeError("Telemetry not initialized. Call init_telemetry() first.")
+        raise RuntimeError("Telemetry not initialized. Call init_services() first.")
     return _telemetry
 
 
-def init_telemetry(plate: str, interval: int | str = 5) -> None:
-    """Initialize the global Telemetry instance.
-    
+def get_control() -> Control:
+    """Get the global Control instance."""
+    if _control is None:
+        raise RuntimeError("Control not initialized. Call init_services() first.")
+    return _control
+
+
+def get_tool_dispatch() -> dict[str, Callable[[dict], str]]:
+    """Get the combined tool dispatch mapping."""
+    if not _tool_dispatch:
+        raise RuntimeError("Tool dispatch not initialized. Call init_services() first.")
+    return _tool_dispatch
+
+
+def init_services(vin: str, interval: int | str = 5) -> None:
+    """Initialize telemetry and control services and build dispatch map.
+
     Args:
-        plate: Vehicle license plate.
-        interval: Data refresh interval in minutes, or 'realtime'.
+        vin: Vehicle VIN to monitor/control
+        interval: Telemetry refresh interval in minutes or 'realtime'
+
+    Raises:
+        ConfigurationError: If services cannot be initialized
     """
-    global _telemetry
-    _telemetry = Telemetry(plate=plate, interval=interval)
+    global _telemetry, _control, _tool_dispatch
+
+    logger.info("Initializing services for VIN ending in ...%s", vin[-4:])
+    logger.info("Telemetry interval: %s", interval)
+
+    try:
+        _telemetry = Telemetry(vin=vin, interval=interval)
+        _control = Control(vin=vin)
+        _tool_dispatch = {
+            **build_telemetry_dispatch(_telemetry),
+            **build_control_dispatch(_control),
+        }
+        logger.info("Services initialized successfully with %d tools", len(_tool_dispatch))
+    except Exception as e:
+        logger.error("Failed to initialize services: %s", str(e), exc_info=True)
+        raise ConfigurationError(f"Service initialization failed: {str(e)}")
 
 
 # =============================================================================
 # TOOL DEFINITIONS
 # =============================================================================
 
-TOOLS = [
-    Tool(
-        name="get_in_service",
-        description="Check if the vehicle is in service mode (used during maintenance/repairs)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_battery_heater_on",
-        description="Check if the battery heater is active (warms battery for optimal charging in cold weather)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_battery_level",
-        description="Get the current battery level as a percentage",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_charge_limit_soc",
-        description="Get the charging limit percentage (100% means no limit set)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_charge_port_door_open",
-        description="Check if the charge port door is open or closed",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_charging_state",
-        description="Get the current charging status (Charging, Complete, Disconnected, etc.)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_minutes_to_full_charge",
-        description="Get the estimated time remaining until charging is complete",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_charging_complete_at",
-        description="Get the estimated date and time when charging will be complete",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_energy_remaining",
-        description="Get the remaining battery energy in kilowatt-hours (kWh)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_lifetime_energy_used",
-        description="Get the total energy consumed by the vehicle over its lifetime in kWh",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_allow_cabin_overheat_protection",
-        description="Check if Cabin Overheat Protection (COP) is enabled",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_outside_temp",
-        description="Get the outside ambient temperature in Celsius",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_is_climate_on",
-        description="Check if the climate control (HVAC) is currently active",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_supports_fan_only_cabin_overheat_protection",
-        description="Check if vehicle supports fan-only Cabin Overheat Protection (uses less energy than AC)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_seat_heater_left",
-        description="Get the driver (left front) seat heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_seat_heater_right",
-        description="Get the passenger (right front) seat heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_seat_heater_rear_left",
-        description="Get the rear left seat heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_seat_heater_rear_center",
-        description="Get the rear center seat heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_seat_heater_rear_right",
-        description="Get the rear right seat heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_side_mirror_heaters",
-        description="Check if the side mirror heaters are active",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_steering_wheel_heater",
-        description="Get the steering wheel heater status and level",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_wiper_blade_heater",
-        description="Check if the windshield wiper blade heater is active",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_location",
-        description="Get the vehicle's current GPS location and heading direction",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_power",
-        description="Get the current power usage or regeneration in kilowatts",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_speed",
-        description="Get the vehicle's current speed",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_shift_state",
-        description="Get the current gear (Park, Reverse, Neutral, Drive)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_active_route",
-        description="Get information about the active navigation route (destination, ETA, distance, battery at arrival)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_sentry_mode",
-        description="Check if Sentry Mode is active (security camera monitoring)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_display_name",
-        description="Get the vehicle's custom display name",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_all_heater_status",
-        description="Get a summary of all heater statuses (seats, steering wheel, mirrors, wipers)",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    Tool(
-        name="get_battery_summary",
-        description="Get a comprehensive battery and charging summary",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-]
-
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    """List all available telemetry tools.
-    
-    Returns:
-        List of Tool definitions.
-    """
-    return TOOLS
+    """List all available telemetry and control tools."""
+    return TELEMETRY_TOOLS + CONTROL_TOOLS
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Execute a telemetry tool.
-    
-    Args:
-        name: Tool name to execute.
-        arguments: Tool arguments (unused for telemetry, but required by MCP).
-    
-    Returns:
-        List containing TextContent with the tool result.
-    
-    Raises:
-        ValueError: If tool name is unknown.
-    """
-    telemetry = get_telemetry()
-    
-    # Map tool names to telemetry methods
-    tool_methods = {
-        "get_in_service": telemetry.get_in_service,
-        "get_battery_heater_on": telemetry.get_battery_heater_on,
-        "get_battery_level": telemetry.get_battery_level,
-        "get_charge_limit_soc": telemetry.get_charge_limit_soc,
-        "get_charge_port_door_open": telemetry.get_charge_port_door_open,
-        "get_charging_state": telemetry.get_charging_state,
-        "get_minutes_to_full_charge": telemetry.get_minutes_to_full_charge,
-        "get_charging_complete_at": telemetry.get_charging_complete_at,
-        "get_energy_remaining": telemetry.get_energy_remaining,
-        "get_lifetime_energy_used": telemetry.get_lifetime_energy_used,
-        "get_allow_cabin_overheat_protection": telemetry.get_allow_cabin_overheat_protection,
-        "get_outside_temp": telemetry.get_outside_temp,
-        "get_is_climate_on": telemetry.get_is_climate_on,
-        "get_supports_fan_only_cabin_overheat_protection": telemetry.get_supports_fan_only_cabin_overheat_protection,
-        "get_seat_heater_left": telemetry.get_seat_heater_left,
-        "get_seat_heater_right": telemetry.get_seat_heater_right,
-        "get_seat_heater_rear_left": telemetry.get_seat_heater_rear_left,
-        "get_seat_heater_rear_center": telemetry.get_seat_heater_rear_center,
-        "get_seat_heater_rear_right": telemetry.get_seat_heater_rear_right,
-        "get_side_mirror_heaters": telemetry.get_side_mirror_heaters,
-        "get_steering_wheel_heater": telemetry.get_steering_wheel_heater,
-        "get_wiper_blade_heater": telemetry.get_wiper_blade_heater,
-        "get_location": telemetry.get_location,
-        "get_power": telemetry.get_power,
-        "get_speed": telemetry.get_speed,
-        "get_shift_state": telemetry.get_shift_state,
-        "get_active_route": telemetry.get_active_route,
-        "get_sentry_mode": telemetry.get_sentry_mode,
-        "get_display_name": telemetry.get_display_name,
-        "get_all_heater_status": telemetry.get_all_heater_status,
-        "get_battery_summary": telemetry.get_battery_summary,
-    }
-    
-    if name not in tool_methods:
+    """Execute a telemetry or control tool."""
+    dispatch = get_tool_dispatch()
+    arguments = arguments or {}
+
+    if name not in dispatch:
         raise ValueError(f"Unknown tool: {name}")
     
-    result = tool_methods[name]()
+    result = dispatch[name](arguments)
     return [TextContent(type="text", text=result)]
 
 
-async def run_server_stdio(plate: str, interval: int | str = 5) -> None:
-    """Run the MCP server with STDIO transport (local).
-    
-    Args:
-        plate: Vehicle license plate to monitor.
-        interval: Data refresh interval in minutes, or 'realtime'.
-    """
-    init_telemetry(plate=plate, interval=interval)
-    
+async def run_server_stdio(vin: str, interval: int | str = 5) -> None:
+    """Run the MCP server with STDIO transport (local)."""
+    init_services(vin=vin, interval=interval)
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,
@@ -300,51 +126,105 @@ async def run_server_stdio(plate: str, interval: int | str = 5) -> None:
         )
 
 
-async def run_server_sse(plate: str, interval: int | str = 5, host: str = "0.0.0.0", port: int = 8000) -> None:
-    """Run the MCP server with SSE transport (remote).
-    
-    Args:
-        plate: Vehicle license plate to monitor.
-        interval: Data refresh interval in minutes, or 'realtime'.
-        host: Host to bind to (0.0.0.0 for all interfaces).
-        port: Port to listen on.
-    """
+async def run_server_sse(
+    vin: str,
+    interval: int | str = 5,
+    host: str = "0.0.0.0",
+    port: int = 8000
+) -> None:
+    """Run the MCP server with SSE transport (remote)."""
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.responses import JSONResponse
     import uvicorn
-    
-    init_telemetry(plate=plate, interval=interval)
+
+    init_services(vin=vin, interval=interval)
     
     sse = SseServerTransport("/messages")
-    
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await app.run(
-                streams[0], streams[1], app.create_initialization_options()
-            )
-    
-    async def handle_messages(request):
-        await sse.handle_post_message(request.scope, request.receive, request._send)
-    
+
+    # IMPORTANT: These handlers must NOT return anything because the MCP SSE
+    # transport handles responses via the provided send callable. Returning a
+    # Response would interfere with that, so we wrap them as ASGI endpoints.
+
+    async def handle_sse_asgi(scope, receive, send):
+        """Handle SSE connections as ASGI app."""
+        logger.info("SSE connection from %s", scope.get("client", ["unknown"])[0] if scope.get("client") else "unknown")
+        try:
+            async with sse.connect_sse(scope, receive, send) as streams:
+                logger.info("SSE streams connected, running MCP app")
+                await app.run(
+                    streams[0], streams[1], app.create_initialization_options()
+                )
+                logger.info("SSE connection closed")
+        except Exception as e:
+            logger.error("Error in SSE handler: %s", str(e), exc_info=True)
+            # Send error response
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": f"Error: {str(e)}".encode(),
+            })
+
+    async def handle_messages_asgi(scope, receive, send):
+        """Handle POST messages as ASGI app."""
+        logger.info("Message POST from %s", scope.get("client", ["unknown"])[0] if scope.get("client") else "unknown")
+        try:
+            await sse.handle_post_message(scope, receive, send)
+            logger.debug("Message handled successfully")
+        except Exception as e:
+            logger.error("Error in messages handler: %s", str(e), exc_info=True)
+            # Send error response
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": f"Error: {str(e)}".encode(),
+            })
+
     async def health(request):
-        return JSONResponse({"status": "ok", "server": "tessie-telemetry"})
-    
+        """Health check endpoint."""
+        return JSONResponse({"status": "ok", "server": MCP_SERVER_NAME})
+
+    class ASGIEndpoint:
+        """Wrap a bare ASGI callable so Starlette treats it as an ASGI app."""
+
+        def __init__(self, handler: Callable):
+            self.handler = handler
+
+        async def __call__(self, scope, receive, send):
+            await self.handler(scope, receive, send)
+
     starlette_app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
-            Route("/sse", handle_sse, methods=["GET"]),
-            Route("/messages", handle_messages, methods=["POST"]),
+            Route("/sse", ASGIEndpoint(handle_sse_asgi), methods=["GET"]),
+            Route("/messages", ASGIEndpoint(handle_messages_asgi), methods=["POST"]),
         ],
     )
     
-    print(f"🚗 Tessie MCP Server running at http://{host}:{port}")
+    logger.info("="*60)
+    logger.info("🚗 Tessie MCP Server running")
+    logger.info("   Base URL: http://%s:%d", host, port)
+    logger.info("   SSE endpoint: http://%s:%d/sse", host, port)
+    logger.info("   Messages endpoint: http://%s:%d/messages", host, port)
+    logger.info("   Health check: http://%s:%d/health", host, port)
+    logger.info("   Tools available: %d", len(_tool_dispatch))
+    logger.info("="*60)
+
+    print(f"\n🚗 Tessie MCP Server running at http://{host}:{port}")
     print(f"   SSE endpoint: http://{host}:{port}/sse")
+    print(f"   Messages endpoint: http://{host}:{port}/messages")
     print(f"   Health check: http://{host}:{port}/health")
-    
+    print(f"   Press CTRL+C to quit\n")
+
     config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
@@ -352,39 +232,79 @@ async def run_server_sse(plate: str, interval: int | str = 5, host: str = "0.0.0
 
 def get_config() -> tuple[str, int | str]:
     """Load configuration from environment or config.py.
-    
+
     Returns:
-        Tuple of (plate, interval).
+        Tuple of (vin, interval) where interval is either an integer or 'realtime'
+
+    Raises:
+        ConfigurationError: If required configuration is missing or invalid
     """
-    # Load plate
-    plate = os.getenv("VEHICLE_PLATE")
-    if not plate:
+    logger.debug("Loading configuration")
+
+    # Load VIN
+    vin = os.getenv(ENV_VEHICLE_VIN)
+    if not vin:
         try:
-            from config import PLATE
-            plate = PLATE
+            from config import VIN
+            vin = VIN
+            logger.info("Loaded VIN from config.py")
         except ImportError:
-            print("Error: VEHICLE_PLATE environment variable or config.PLATE required")
-            sys.exit(1)
-    
+            error_msg = (
+                f"{ENV_VEHICLE_VIN} environment variable or config.VIN required. "
+                "Please set VEHICLE_VIN in your .env file."
+            )
+            logger.error(error_msg)
+            raise ConfigurationError(error_msg)
+
+    # Validate VIN format
+    if not validate_vin(vin):
+        logger.warning("VIN appears to have invalid format (expected 17 characters)")
+
     # Load interval
-    interval_str = os.getenv("TELEMETRY_INTERVAL", "5")
+    interval_str = os.getenv(ENV_TELEMETRY_INTERVAL, "5")
     if interval_str.lower() == "realtime":
         interval: int | str = "realtime"
+        logger.info("Using realtime telemetry (no caching)")
     else:
         try:
             interval = int(interval_str)
-        except ValueError:
-            print(f"Error: Invalid TELEMETRY_INTERVAL: {interval_str}")
-            sys.exit(1)
-    
-    return plate, interval
+            if interval <= 0:
+                raise ValueError("Interval must be positive")
+            logger.info("Using %d minute telemetry interval", interval)
+        except ValueError as e:
+            error_msg = f"Invalid {ENV_TELEMETRY_INTERVAL}: {interval_str}. Must be a positive integer or 'realtime'."
+            logger.error(error_msg)
+            raise ConfigurationError(error_msg)
+
+    return vin, interval
 
 
 def main() -> None:
-    """Main entry point for the MCP server."""
+    """Main entry point for the MCP server.
+
+    Parses command line arguments, loads configuration, and starts the server
+    in the requested transport mode (STDIO or SSE).
+    """
     import asyncio
-    
-    parser = argparse.ArgumentParser(description="Tesla Tessie MCP Server")
+
+    logger.info("Starting Tessie MCP Server")
+
+    parser = argparse.ArgumentParser(
+        description="Tesla Tessie MCP Server - Exposes Tesla telemetry and control via Tessie API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with STDIO transport (local)
+  python -m src.server
+
+  # Run with SSE transport (remote HTTP)
+  python -m src.server --transport sse --port 8000
+
+Configuration:
+  Set VEHICLE_VIN and TESSIE_TOKEN in .env file.
+  See .env.example for template.
+        """
+    )
     parser.add_argument(
         "--transport", "-t",
         choices=["stdio", "sse"],
@@ -393,25 +313,46 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Host to bind to for SSE mode (default: 0.0.0.0)"
+        default=DEFAULT_SSE_HOST,
+        help=f"Host to bind to for SSE mode (default: {DEFAULT_SSE_HOST})"
     )
     parser.add_argument(
         "--port", "-p",
         type=int,
-        default=8000,
-        help="Port for SSE mode (default: 8000)"
+        default=DEFAULT_SSE_PORT,
+        help=f"Port for SSE mode (default: {DEFAULT_SSE_PORT})"
     )
-    
+
     args = parser.parse_args()
-    plate, interval = get_config()
-    
-    if args.transport == "sse":
-        asyncio.run(run_server_sse(plate, interval, args.host, args.port))
-    else:
-        asyncio.run(run_server_stdio(plate, interval))
+
+    try:
+        vin, interval = get_config()
+
+        if args.transport == "sse":
+            logger.info("Starting in SSE mode on %s:%d", args.host, args.port)
+            asyncio.run(run_server_sse(vin, interval, args.host, args.port))
+        else:
+            logger.info("Starting in STDIO mode")
+            asyncio.run(run_server_stdio(vin, interval))
+
+    except ConfigurationError as e:
+        logger.critical("Configuration error: %s", str(e))
+        print(f"\n❌ Configuration Error: {str(e)}\n", file=sys.stderr)
+        sys.exit(1)
+    except TessieMCPError as e:
+        logger.critical("Fatal error: %s", str(e))
+        print(f"\n❌ Error: {str(e)}\n", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+        print("\nServer stopped.", file=sys.stderr)
+        sys.exit(0)
+    except Exception as e:
+        logger.critical("Unexpected error: %s", str(e), exc_info=True)
+        print(f"\n❌ Unexpected Error: {str(e)}\n", file=sys.stderr)
+        print("Check logs for details.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-
